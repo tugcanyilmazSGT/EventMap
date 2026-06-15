@@ -1,0 +1,15 @@
+{
+  "name": "event-intelligence-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@supabase/supabase-js": "^2.47.0",
+    "playwright": "^1.49.0",
+    "resend": "^4.0.0",
+    "p-limit": "^6.1.0"
+  }
+}
