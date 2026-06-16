@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Resend } from 'resend';
 import pLimit from 'p-limit';
+import ws from 'ws'; 
 
 // ── Clients ─────────────────────────────────────────────────
 const supabase = createClient(
