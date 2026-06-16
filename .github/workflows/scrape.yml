@@ -2,8 +2,8 @@ name: Weekly Event Scraper
 
 on:
   schedule:
-    - cron: '0 4 * * 1'   # Her Pazartesi 04:00 UTC (07:00 Türkiye)
-  workflow_dispatch:        # Manuel tetikleme (test için)
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -18,12 +18,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: scraper/package-lock.json
 
       - name: Install dependencies
         working-directory: scraper
-        run: npm ci
+        run: npm install
 
       - name: Install Playwright browsers
         working-directory: scraper
