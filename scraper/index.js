@@ -17,7 +17,7 @@ const gemini = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Aynı anda max 3 sayfa işle (rate limit aşmamak için)
-const limit = pLimit(3);
+const limit = pLimit(1);
 
 // ── Ana Akış ────────────────────────────────────────────────
 async function main() {
@@ -106,7 +106,7 @@ async function scrapeSource(browser, source, stats) {
     stats.events_found += eventLinks.length;
 
     // Her etkinlik detay sayfasını işle
-    for (const link of eventLinks.slice(0, 50)) { // kaynak başına max 50
+    for (const link of eventLinks.slice(0, 20)) { // kaynak başına max 20
       try {
         const eventData = await scrapeEventPage(context, link, source);
         if (eventData) {
@@ -189,6 +189,7 @@ async function scrapeEventPage(context, url, source) {
 
     // Gemini'ye gönder
     const eventData = await extractWithGemini(html, title, url, pdfLinks[0] || null);
+    await new Promise(r => setTimeout(r, 3000)); // 3 saniye bekle
     return eventData;
 
   } finally {
