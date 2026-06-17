@@ -17,21 +17,30 @@ const limit = pLimit(1);
 
 // ── OpenRouter — openai paketi yok, direkt fetch ─────────────
 async function callAI(prompt) {
-  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'llama-3.1-8b-instant',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-    }),
-  });
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-  return data.choices?.[0]?.message?.content?.trim() || '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 1000,  // ← token limitini düşür
+      }),
+    });
+    const data = await response.json();
+    if (data.error?.message?.includes('Rate limit')) {
+      console.log(`  ⏳ Rate limit, ${15}sn bekleniyor...`);
+      await new Promise(r => setTimeout(r, 15000));
+      continue;
+    }
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.choices?.[0]?.message?.content?.trim() || '';
+  }
+  throw new Error('Rate limit aşıldı, 3 deneme başarısız');
 }
 
 // ── Ana Akış ────────────────────────────────────────────────
@@ -193,7 +202,7 @@ async function extractWithAI(html, pageTitle, url) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 6000);
+    .slice(0, 3000);
 
   const prompt = `Extract event information from this web page content.
 Page title: "${pageTitle}"
