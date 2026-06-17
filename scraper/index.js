@@ -1,7 +1,7 @@
 // scraper/index.js
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai';
 import { Resend } from 'resend';
 import pLimit from 'p-limit';
 import ws from 'ws'; 
@@ -12,8 +12,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const gemini = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const openai = new OpenAI({
+  baseURL: 'https://openrouter.ai/api/v1',
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Aynı anda max 3 sayfa işle (rate limit aşmamak için)
@@ -187,8 +189,8 @@ async function scrapeEventPage(context, url, source) {
       Array.from(document.querySelectorAll('a[href$=".pdf"]')).map((a) => a.href)
     );
 
-    // Gemini'ye gönder
-    const eventData = await extractWithGemini(html, title, url, pdfLinks[0] || null);
+    // AI'a gönder
+   const eventData = await extractWithAI(html, title, url);
     await new Promise(r => setTimeout(r, 3000)); // 3 saniye bekle
     return eventData;
 
@@ -197,32 +199,29 @@ async function scrapeEventPage(context, url, source) {
   }
 }
 
-// ── Gemini AI Extraction ─────────────────────────────────────
-async function extractWithGemini(html, pageTitle, url, pdfUrl) {
-  // HTML'i kısalt (token limiti için)
+// ── extractWithAI ─────────────────────────────────────
+async function extractWithAI(html, pageTitle, url) {
   const cleanedHtml = html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 8000); // max 8000 karakter
+    .slice(0, 6000);
 
-  const prompt = `
-Aşağıdaki web sayfası içeriğinden bir etkinlik bilgisi çıkar.
-Sayfa başlığı: "${pageTitle}"
-Sayfa URL: ${url}
+  const prompt = `Extract event information from this web page content.
+Page title: "${pageTitle}"
+Page URL: ${url}
 
-KURALLAR:
-- Yalnızca emin olduğun alanları doldur
-- Emin olmadığın alanları null bırak
-- Tarihler ISO 8601 formatında olsun (YYYY-MM-DD)
-- format alanı sadece: "online", "physical", "hybrid" veya null
-- category alanı: "conference", "congress", "symposium", "fair", "workshop", "seminar" veya null
-- Türkçe veya İngilizce içerik olabilir
-- Sadece JSON döndür, başka hiçbir şey yazma
+RULES:
+- Only fill fields you are confident about
+- Leave uncertain fields as null
+- Dates must be ISO 8601 format (YYYY-MM-DD)
+- format field: only "online", "physical", "hybrid" or null
+- category field: only "conference", "congress", "symposium", "fair", "workshop", "seminar" or null
+- Return ONLY valid JSON, no other text
 
-JSON ŞEMASI:
+JSON SCHEMA:
 {
   "title": string | null,
   "description": string | null,
@@ -245,19 +244,20 @@ JSON ŞEMASI:
   "confidence": number
 }
 
-SAYFA İÇERİĞİ:
-${cleanedHtml}
-`;
+PAGE CONTENT:
+${cleanedHtml}`;
 
   try {
-    const result = await gemini.generateContent(prompt);
-    const text = result.response.text().trim();
+    const response = await openai.chat.completions.create({
+      model: 'meta-llama/llama-3.1-8b-instruct:free',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+    });
 
-    // JSON parse
+    const text = response.choices[0]?.message?.content?.trim() || '';
     const jsonStr = text.replace(/```json|```/g, '').trim();
     const data = JSON.parse(jsonStr);
 
-    // Minimum confidence kontrolü
     if (!data.title || (data.confidence && data.confidence < 0.3)) {
       return null;
     }
@@ -270,7 +270,7 @@ ${cleanedHtml}
     };
 
   } catch (err) {
-    console.warn(`  ⚠️ Gemini parse hatası: ${err.message}`);
+    console.warn(`  ⚠️ AI parse hatası: ${err.message}`);
     return null;
   }
 }
