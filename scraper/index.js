@@ -13,8 +13,8 @@ const supabase = createClient(
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ⚡ concurrency (OPTIMAL: 2-3)
-const limit = pLimit(3);
+// concurrency
+const limit = pLimit(2);
 
 // ── AI CALL ─────────────────────────────────────────────
 async function callAI(prompt) {
@@ -36,7 +36,7 @@ async function callAI(prompt) {
     const data = await response.json();
 
     if (data.error?.message?.includes('Rate limit')) {
-      console.log('⏳ Rate limit 15sn bekleniyor...');
+      console.log('⏳ Rate limit → 15sn bekleniyor...');
       await new Promise(r => setTimeout(r, 15000));
       continue;
     }
@@ -62,7 +62,9 @@ function safeJson(text) {
 
     try {
       return JSON.parse(fixed);
-    } catch {
+    } catch (e) {
+      console.warn('⚠️ JSON parse failed, raw output logged');
+      console.log(fixed);
       return null;
     }
   }
@@ -96,7 +98,7 @@ async function main() {
       .select('*')
       .eq('is_active', true);
 
-    console.log(`📋 ${sources.length} sources`);
+    console.log(`📋 ${sources.length} sources found`);
 
     const browser = await chromium.launch({
       headless: true,
@@ -125,7 +127,7 @@ async function main() {
     console.log('✅ DONE:', stats);
 
   } catch (err) {
-    console.error(err);
+    console.error('❌ ERROR:', err);
 
     await supabase
       .from('scrape_logs')
@@ -149,7 +151,7 @@ async function scrapeSource(browser, source, stats) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
   });
 
-  // ⚡ SPEED BOOST: block heavy resources
+  // speed boost
   await context.route('**/*', (route) => {
     const type = route.request().resourceType();
     if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
@@ -167,28 +169,24 @@ async function scrapeSource(browser, source, stats) {
     });
 
     const links = await extractEventLinks(page, source.url);
+
     console.log(`📎 ${links.length} links`);
 
     stats.sources_scraped++;
     stats.events_found += links.length;
 
-    const pages = [];
+    const events = [];
 
     for (const link of links.slice(0, 20)) {
       try {
         const data = await scrapeEventPageRaw(context, link);
 
-        if (data) pages.push(data);
+        if (data) events.push(data);
 
-        // ⚡ batch AI every 10 pages
-        if (pages.length === 10) {
-          const aiResults = await extractBatchWithAI(pages);
-
-          if (aiResults) {
-            await processAIResults(aiResults, source, stats);
-          }
-
-          pages.length = 0;
+        // AI per 10 pages (SAFE MODE)
+        if (events.length === 10) {
+          const ai = await processAI(events, source, stats);
+          events.length = 0;
         }
 
         await delay(400, 900);
@@ -197,19 +195,15 @@ async function scrapeSource(browser, source, stats) {
       }
     }
 
-    // remaining batch
-    if (pages.length > 0) {
-      const aiResults = await extractBatchWithAI(pages);
-      if (aiResults) {
-        await processAIResults(aiResults, source, stats);
-      }
+    if (events.length > 0) {
+      await processAI(events, source, stats);
     }
 
     await supabase
       .from('sources')
       .update({
         last_scraped_at: new Date().toISOString(),
-        scrape_count: source.scrape_count + 1,
+        scraped_count: (source.scraped_count || 0) + 1,
       })
       .eq('id', source.id);
 
@@ -220,7 +214,7 @@ async function scrapeSource(browser, source, stats) {
   }
 }
 
-// ── RAW SCRAPE (NO AI) ──────────────────────────────────
+// ── RAW SCRAPE ──────────────────────────────────────────
 async function scrapeEventPageRaw(context, url) {
   const page = await context.newPage();
 
@@ -244,53 +238,48 @@ async function scrapeEventPageRaw(context, url) {
   }
 }
 
-// ── BATCH AI ────────────────────────────────────────────
-async function extractBatchWithAI(pages) {
+// ── AI PROCESS ──────────────────────────────────────────
+async function processAI(events, source, stats) {
   const prompt = `
-Extract events. Return ONLY JSON array.
+Extract event info.
 
-RULES:
-- valid JSON only
-- no markdown
-- null if unknown
+Return ONLY valid JSON array.
 
 FIELDS:
-title, description, city, country, start_date, end_date, website, confidence
+title, description, category, country, city, venue,
+start_date, end_date,
+abstract_deadline, fullpaper_deadline, early_registration_deadline,
+website, cfp_link, contact_email, organizer, fee_info,
+confidence
 
-PAGES:
-${pages.map((p, i) => `
+DATA:
+${events.map((e, i) => `
 [${i}]
-title:${p.title}
-url:${p.url}
-content:${p.html}
+url:${e.url}
+title:${e.title}
+content:${e.html}
 `).join('\n')}
 `;
 
   const text = await callAI(prompt);
-  return safeJson(text);
-}
+  const json = safeJson(text);
 
-// ── PROCESS AI ──────────────────────────────────────────
-async function processAIResults(results, source, stats) {
-  if (!Array.isArray(results)) return;
+  if (!Array.isArray(json)) return;
 
-  const inserts = [];
-
-  for (const r of results) {
-    if (!r?.title) continue;
-
-    inserts.push({
-      ...r,
+  const inserts = json
+    .filter(e => e?.title)
+    .map(e => ({
+      ...e,
       source_id: source.id,
-      source_url: r.website,
+      source_url: e.website || e.url || null,
       is_new: true,
       is_active: true,
-      ai_confidence_score: r.confidence || 0.5,
+      ai_confidence_score: e.confidence || 0.5,
       ai_extracted_at: new Date().toISOString(),
-    });
-  }
+      ai_model: 'llama-3.1-8b-instant',
+    }));
 
-  if (inserts.length === 0) return;
+  if (!inserts.length) return;
 
   const { error } = await supabase
     .from('events')
@@ -305,16 +294,19 @@ async function processAIResults(results, source, stats) {
 async function extractEventLinks(page, baseUrl) {
   return page.evaluate((base) => {
     const links = [...document.querySelectorAll('a[href]')];
+
     return [...new Set(
-      links.map(a => {
-        try { return new URL(a.href, base).href; }
-        catch { return null; }
-      }).filter(Boolean)
+      links
+        .map(a => {
+          try { return new URL(a.href, base).href; }
+          catch { return null; }
+        })
+        .filter(Boolean)
     )];
   }, baseUrl);
 }
 
-// ── EMAIL (unchanged) ───────────────────────────────────
+// ── NOTIFICATIONS ───────────────────────────────────────
 async function sendNotifications(stats) {
   if (stats.events_added === 0) return;
 
@@ -323,12 +315,6 @@ async function sendNotifications(stats) {
     .select('*')
     .eq('is_active', true)
     .eq('confirmed', true);
-
-  const { data: newEvents } = await supabase
-    .from('events')
-    .select('*')
-    .eq('is_new', true)
-    .limit(20);
 
   for (const sub of subs || []) {
     try {
