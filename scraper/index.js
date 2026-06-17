@@ -15,7 +15,7 @@ const supabase = createClient(
 
 const openai = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY ?? 'no-key',
+  apiKey: process.env.OPENROUTER_API_KEY,
 });
 const resend = new Resend(process.env.RESEND_API_KEY);
 
