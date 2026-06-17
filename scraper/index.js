@@ -16,15 +16,15 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const limit = pLimit(1);
 
 // ── OpenRouter — openai paketi yok, direkt fetch ─────────────
-async function callOpenRouter(prompt) {
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+async function callAI(prompt) {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'meta-llama/llama-3.1-8b-instruct',
+      model: 'llama-3.1-8b-instant',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
     }),
@@ -234,7 +234,7 @@ PAGE CONTENT:
 ${cleanedHtml}`;
 
   try {
-    const text = await callOpenRouter(prompt);
+    const text = await callAI(prompt);
     const jsonStr = text.replace(/```json|```/g, '').trim();
     const data = JSON.parse(jsonStr);
 
