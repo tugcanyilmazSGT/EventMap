@@ -10,6 +10,7 @@ import ws from 'ws';
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
+  { global: { WebSocket: ws } }  // ← bu satır eksik
 );
 
 const openai = new OpenAI({
