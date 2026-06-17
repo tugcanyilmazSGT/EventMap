@@ -1,32 +1,43 @@
 // scraper/index.js
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
 import { Resend } from 'resend';
 import pLimit from 'p-limit';
-import ws from 'ws'; 
+import ws from 'ws';
 
 // ── Clients ─────────────────────────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-  { global: { WebSocket: ws } }  // ← bu satır eksik
+  process.env.SUPABASE_SERVICE_KEY,
+  { global: { WebSocket: ws } }
 );
 
-const openai = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-// Aynı anda max 3 sayfa işle (rate limit aşmamak için)
 const limit = pLimit(1);
+
+// ── OpenRouter — openai paketi yok, direkt fetch ─────────────
+async function callOpenRouter(prompt) {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-3.1-8b-instruct:free',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+    }),
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  return data.choices?.[0]?.message?.content?.trim() || '';
+}
 
 // ── Ana Akış ────────────────────────────────────────────────
 async function main() {
   console.log('🚀 Event Intelligence Scraper başladı...');
 
-  // Scrape log kaydı aç
   const { data: log } = await supabase
     .from('scrape_logs')
     .insert({ status: 'running', triggered_by: 'github_actions' })
@@ -43,11 +54,9 @@ async function main() {
   };
 
   try {
-    // 1. is_new flaglerini sıfırla
     await supabase.rpc('reset_is_new_flags');
     console.log('✅ is_new flagleri sıfırlandı');
 
-    // 2. Aktif kaynakları çek
     const { data: sources } = await supabase
       .from('sources')
       .select('*')
@@ -55,24 +64,19 @@ async function main() {
 
     console.log(`📋 ${sources.length} kaynak bulundu`);
 
-    // 3. Browser başlat
     const browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
-    // 4. Her kaynağı tara
     const tasks = sources.map((source) =>
       limit(() => scrapeSource(browser, source, stats))
     );
     await Promise.all(tasks);
 
     await browser.close();
-
-    // 5. E-mail bildirimleri gönder
     await sendNotifications(stats);
 
-    // 6. Log güncelle
     await supabase
       .from('scrape_logs')
       .update({ ...stats, status: 'completed', finished_at: new Date().toISOString() })
@@ -101,15 +105,13 @@ async function scrapeSource(browser, source, stats) {
   try {
     await page.goto(source.url, { waitUntil: 'networkidle', timeout: 30000 });
 
-    // Etkinlik linklerini bul
     const eventLinks = await extractEventLinks(page, source.url);
     console.log(`  📎 ${eventLinks.length} etkinlik linki bulundu`);
 
     stats.sources_scraped++;
     stats.events_found += eventLinks.length;
 
-    // Her etkinlik detay sayfasını işle
-    for (const link of eventLinks.slice(0, 20)) { // kaynak başına max 20
+    for (const link of eventLinks.slice(0, 20)) {
       try {
         const eventData = await scrapeEventPage(context, link, source);
         if (eventData) {
@@ -124,7 +126,6 @@ async function scrapeSource(browser, source, stats) {
       }
     }
 
-    // Kaynak last_scraped_at güncelle
     await supabase
       .from('sources')
       .update({ last_scraped_at: new Date().toISOString(), scrape_count: source.scrape_count + 1 })
@@ -139,21 +140,16 @@ async function scrapeSource(browser, source, stats) {
 
 // ── Etkinlik Linklerini Çıkar ────────────────────────────────
 async function extractEventLinks(page, baseUrl) {
-  // Sayfadaki tüm linkleri al, etkinlik gibi görünenleri filtrele
   const links = await page.evaluate((base) => {
     const anchors = Array.from(document.querySelectorAll('a[href]'));
     return anchors
       .map((a) => {
-        try {
-          return new URL(a.href, base).href;
-        } catch {
-          return null;
-        }
+        try { return new URL(a.href, base).href; }
+        catch { return null; }
       })
       .filter(Boolean);
   }, baseUrl);
 
-  // Etkinlik URL pattern filtresi
   const eventPatterns = [
     /\/event\//i, /\/conference\//i, /\/congress\//i,
     /\/symposium\//i, /\/seminar\//i, /\/workshop\//i,
@@ -171,36 +167,25 @@ async function extractEventLinks(page, baseUrl) {
 // ── Etkinlik Detay Sayfası ───────────────────────────────────
 async function scrapeEventPage(context, url, source) {
   const page = await context.newPage();
-
   try {
-    // Popup'ları aynı context'te yakala
     const popupPromise = context.waitForEvent('page', { timeout: 3000 }).catch(() => null);
     await page.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     const popup = await popupPromise;
-    if (popup) {
-      await popup.waitForLoadState('networkidle').catch(() => {});
-    }
+    if (popup) await popup.waitForLoadState('networkidle').catch(() => {});
 
     const targetPage = popup || page;
     const html = await targetPage.content();
     const title = await targetPage.title();
 
-    // PDF linkleri kontrol et
-    const pdfLinks = await targetPage.evaluate(() =>
-      Array.from(document.querySelectorAll('a[href$=".pdf"]')).map((a) => a.href)
-    );
-
-    // AI'a gönder
-   const eventData = await extractWithAI(html, title, url);
-    await new Promise(r => setTimeout(r, 3000)); // 3 saniye bekle
+    const eventData = await extractWithAI(html, title, url);
+    await new Promise(r => setTimeout(r, 3000));
     return eventData;
-
   } finally {
     await page.close();
   }
 }
 
-// ── extractWithAI ─────────────────────────────────────
+// ── AI Extraction ─────────────────────────────────────────────
 async function extractWithAI(html, pageTitle, url) {
   const cleanedHtml = html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -220,7 +205,7 @@ RULES:
 - Dates must be ISO 8601 format (YYYY-MM-DD)
 - format field: only "online", "physical", "hybrid" or null
 - category field: only "conference", "congress", "symposium", "fair", "workshop", "seminar" or null
-- Return ONLY valid JSON, no other text
+- Return ONLY valid JSON, no other text, no markdown
 
 JSON SCHEMA:
 {
@@ -249,19 +234,11 @@ PAGE CONTENT:
 ${cleanedHtml}`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct:free',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-    });
-
-    const text = response.choices[0]?.message?.content?.trim() || '';
+    const text = await callOpenRouter(prompt);
     const jsonStr = text.replace(/```json|```/g, '').trim();
     const data = JSON.parse(jsonStr);
 
-    if (!data.title || (data.confidence && data.confidence < 0.3)) {
-      return null;
-    }
+    if (!data.title || (data.confidence && data.confidence < 0.3)) return null;
 
     return {
       ...data,
@@ -269,7 +246,6 @@ ${cleanedHtml}`;
       ai_extracted_at: new Date().toISOString(),
       ai_confidence_score: data.confidence || 0.5,
     };
-
   } catch (err) {
     console.warn(`  ⚠️ AI parse hatası: ${err.message}`);
     return null;
@@ -278,8 +254,6 @@ ${cleanedHtml}`;
 
 // ── Supabase Upsert ──────────────────────────────────────────
 async function upsertEvent(eventData, source) {
-  // Duplicate kontrolü: aynı website veya source_url var mı?
-  const checkUrl = eventData.website || eventData.source_url;
   const { data: existing } = await supabase
     .from('events')
     .select('id, title, abstract_deadline')
@@ -287,7 +261,6 @@ async function upsertEvent(eventData, source) {
     .maybeSingle();
 
   if (existing) {
-    // Güncelle (tarih değişmiş olabilir)
     await supabase
       .from('events')
       .update({
@@ -301,7 +274,6 @@ async function upsertEvent(eventData, source) {
     return 'updated';
   }
 
-  // Yeni kayıt ekle
   const { error } = await supabase.from('events').insert({
     ...eventData,
     source_id: source.id,
@@ -331,7 +303,6 @@ async function sendNotifications(stats) {
 
   if (!subs || subs.length === 0) return;
 
-  // Yeni etkinlikleri çek
   const { data: newEvents } = await supabase
     .from('events')
     .select('title, category, country, start_date, abstract_deadline, website')
@@ -340,7 +311,6 @@ async function sendNotifications(stats) {
     .order('created_at', { ascending: false })
     .limit(20);
 
-  // Yaklaşan deadline'ları çek
   const { data: deadlineEvents } = await supabase
     .from('upcoming_deadlines')
     .select('*')
@@ -351,7 +321,6 @@ async function sendNotifications(stats) {
       if (sub.weekly_summary || sub.new_events) {
         await sendWeeklySummaryEmail(sub, newEvents, deadlineEvents, stats);
       }
-
       await supabase.from('notification_logs').insert({
         subscription_id: sub.id,
         email: sub.email,
@@ -359,7 +328,6 @@ async function sendNotifications(stats) {
         events_count: newEvents?.length || 0,
         status: 'sent',
       });
-
     } catch (err) {
       console.warn(`  ⚠️ Mail gönderilemedi: ${sub.email} — ${err.message}`);
       await supabase.from('notification_logs').insert({
@@ -385,13 +353,11 @@ async function sendWeeklySummaryEmail(sub, newEvents, deadlineEvents, stats) {
     </tr>
   `).join('');
 
-  const html = `
-<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html>
 <body style="font-family:sans-serif;max-width:700px;margin:auto;padding:20px">
   <h2 style="color:#1e40af">📅 Haftalık Etkinlik Raporu</h2>
   <p>Bu hafta <strong>${stats.events_added}</strong> yeni etkinlik eklendi.</p>
-
   <h3>🆕 Yeni Etkinlikler</h3>
   <table width="100%" cellspacing="0" style="border-collapse:collapse">
     <thead>
@@ -405,13 +371,6 @@ async function sendWeeklySummaryEmail(sub, newEvents, deadlineEvents, stats) {
     </thead>
     <tbody>${newEventRows}</tbody>
   </table>
-
-  <p style="margin-top:24px;color:#64748b;font-size:12px">
-    Bu maili almak istemiyorsanız 
-    <a href="${process.env.NEXT_PUBLIC_APP_URL}/unsubscribe?email=${sub.email}">
-      buraya tıklayın
-    </a>.
-  </p>
 </body>
 </html>`;
 
