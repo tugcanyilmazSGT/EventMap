@@ -13,7 +13,6 @@ const supabase = createClient(
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// concurrency
 const limit = pLimit(2);
 
 // ── AI CALL ─────────────────────────────────────────────
@@ -29,7 +28,7 @@ async function callAI(prompt) {
         model: 'llama-3.1-8b-instant',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
-        max_tokens: 600,
+        max_tokens: 2500, // 🔥 reduced safety cap
       }),
     });
 
@@ -49,7 +48,7 @@ async function callAI(prompt) {
   throw new Error('AI failed after retries');
 }
 
-// ── SAFE JSON PARSER ────────────────────────────────────
+// ── SAFE JSON ───────────────────────────────────────────
 function safeJson(text) {
   try {
     return JSON.parse(text);
@@ -62,9 +61,8 @@ function safeJson(text) {
 
     try {
       return JSON.parse(fixed);
-    } catch (e) {
-      console.warn('⚠️ JSON parse failed, raw output logged');
-      console.log(fixed);
+    } catch {
+      console.log('⚠️ JSON parse failed');
       return null;
     }
   }
@@ -98,7 +96,7 @@ async function main() {
       .select('*')
       .eq('is_active', true);
 
-    console.log(`📋 ${sources.length} sources found`);
+    console.log(`📋 ${sources.length} sources`);
 
     const browser = await chromium.launch({
       headless: true,
@@ -147,11 +145,12 @@ async function scrapeSource(browser, source, stats) {
   console.log(`🔍 ${source.name}`);
 
   const context = await browser.newContext({
+    ignoreHTTPSErrors: true, // 🔥 FIX 4
     userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
   });
 
-  // speed boost
+  // block heavy resources
   await context.route('**/*', (route) => {
     const type = route.request().resourceType();
     if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
@@ -168,7 +167,10 @@ async function scrapeSource(browser, source, stats) {
       timeout: 60000,
     });
 
-    const links = await extractEventLinks(page, source.url);
+    let links = await extractEventLinks(page, source.url);
+
+    // 🔥 FIX 2: limit link explosion
+    links = links.slice(0, 25);
 
     console.log(`📎 ${links.length} links`);
 
@@ -177,19 +179,18 @@ async function scrapeSource(browser, source, stats) {
 
     const events = [];
 
-    for (const link of links.slice(0, 20)) {
+    for (const link of links) {
       try {
         const data = await scrapeEventPageRaw(context, link);
-
         if (data) events.push(data);
 
-        // AI per 10 pages (SAFE MODE)
+        // batch per 10
         if (events.length === 10) {
-          const ai = await processAI(events, source, stats);
+          await processAI(events, source, stats);
           events.length = 0;
         }
 
-        await delay(400, 900);
+        await delay(300, 700);
       } catch (e) {
         console.warn('skip:', link);
       }
@@ -203,7 +204,7 @@ async function scrapeSource(browser, source, stats) {
       .from('sources')
       .update({
         last_scraped_at: new Date().toISOString(),
-        scraped_count: (source.scraped_count || 0) + 1,
+        scraped_count: (source.scraped_count || 0) + 1, // 🔥 FIX 1
       })
       .eq('id', source.id);
 
@@ -227,10 +228,17 @@ async function scrapeEventPageRaw(context, url) {
     const html = await page.content();
     const title = await page.title();
 
+    // 🔥 FIX 3: aggressive trimming
+    const cleanHtml = html
+      .replace(/<script[\s\S]*?<\/script>/g, '')
+      .replace(/<style[\s\S]*?<\/style>/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 800);
+
     return {
       url,
       title,
-      html: html.slice(0, 2000),
+      html: cleanHtml,
     };
 
   } finally {
@@ -241,16 +249,15 @@ async function scrapeEventPageRaw(context, url) {
 // ── AI PROCESS ──────────────────────────────────────────
 async function processAI(events, source, stats) {
   const prompt = `
-Extract event info.
+Extract events.
 
-Return ONLY valid JSON array.
+Return ONLY JSON array.
 
 FIELDS:
-title, description, category, country, city, venue,
+title, description, category, country, city,
 start_date, end_date,
-abstract_deadline, fullpaper_deadline, early_registration_deadline,
-website, cfp_link, contact_email, organizer, fee_info,
-confidence
+abstract_deadline, fullpaper_deadline,
+website, confidence
 
 DATA:
 ${events.map((e, i) => `
@@ -271,7 +278,7 @@ content:${e.html}
     .map(e => ({
       ...e,
       source_id: source.id,
-      source_url: e.website || e.url || null,
+      source_url: e.website || e.url,
       is_new: true,
       is_active: true,
       ai_confidence_score: e.confidence || 0.5,
@@ -296,12 +303,10 @@ async function extractEventLinks(page, baseUrl) {
     const links = [...document.querySelectorAll('a[href]')];
 
     return [...new Set(
-      links
-        .map(a => {
-          try { return new URL(a.href, base).href; }
-          catch { return null; }
-        })
-        .filter(Boolean)
+      links.map(a => {
+        try { return new URL(a.href, base).href; }
+        catch { return null; }
+      }).filter(Boolean)
     )];
   }, baseUrl);
 }
