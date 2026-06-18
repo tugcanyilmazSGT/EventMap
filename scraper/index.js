@@ -12,8 +12,7 @@ const supabase = createClient(
 );
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-const limit = pLimit(2);
+const limit = pLimit(1);
 
 // ── AI CALL ─────────────────────────────────────────────
 async function callAI(prompt) {
@@ -28,7 +27,7 @@ async function callAI(prompt) {
         model: 'llama-3.1-8b-instant',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
-        max_tokens: 2500, // 🔥 reduced safety cap
+        max_tokens: 1000,
       }),
     });
 
@@ -48,7 +47,7 @@ async function callAI(prompt) {
   throw new Error('AI failed after retries');
 }
 
-// ── SAFE JSON ───────────────────────────────────────────
+// ── SAFE JSON ────────────────────────────────────────────
 function safeJson(text) {
   try {
     return JSON.parse(text);
@@ -56,19 +55,17 @@ function safeJson(text) {
     const fixed = text
       .replace(/```json/g, '')
       .replace(/```/g, '')
-      .replace(/[\u0000-\u001F]+/g, '')
+      .replace(/[\u0000-\u001F]+/g, ' ')
       .trim();
-
     try {
       return JSON.parse(fixed);
     } catch {
-      console.log('⚠️ JSON parse failed');
       return null;
     }
   }
 }
 
-// ── MAIN ────────────────────────────────────────────────
+// ── MAIN ─────────────────────────────────────────────────
 async function main() {
   console.log('🚀 Scraper started...');
 
@@ -96,7 +93,7 @@ async function main() {
       .select('*')
       .eq('is_active', true);
 
-    console.log(`📋 ${sources.length} sources`);
+    console.log(`📋 ${sources.length} kaynak bulundu`);
 
     const browser = await chromium.launch({
       headless: true,
@@ -104,216 +101,222 @@ async function main() {
     });
 
     await Promise.all(
-      sources.map(source =>
-        limit(() => scrapeSource(browser, source, stats))
-      )
+      sources.map(source => limit(() => scrapeSource(browser, source, stats)))
     );
 
     await browser.close();
-
     await sendNotifications(stats);
 
     await supabase
       .from('scrape_logs')
-      .update({
-        ...stats,
-        status: 'completed',
-        finished_at: new Date().toISOString(),
-      })
+      .update({ ...stats, status: 'completed', finished_at: new Date().toISOString() })
       .eq('id', logId);
 
     console.log('✅ DONE:', stats);
 
   } catch (err) {
     console.error('❌ ERROR:', err);
-
     await supabase
       .from('scrape_logs')
-      .update({
-        status: 'failed',
-        error_message: err.message,
-        finished_at: new Date().toISOString(),
-      })
+      .update({ status: 'failed', error_message: err.message, finished_at: new Date().toISOString() })
       .eq('id', logId);
-
     process.exit(1);
   }
 }
 
-// ── SOURCE SCRAPER ──────────────────────────────────────
+// ── SOURCE SCRAPER ───────────────────────────────────────
 async function scrapeSource(browser, source, stats) {
-  console.log(`🔍 ${source.name}`);
+  console.log(`\n🔍 ${source.name} (${source.url})`);
 
   const context = await browser.newContext({
-    ignoreHTTPSErrors: true, // 🔥 FIX 4
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
+    ignoreHTTPSErrors: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
   });
 
-  // block heavy resources
   await context.route('**/*', (route) => {
     const type = route.request().resourceType();
-    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
-      return route.abort();
-    }
+    if (['image', 'media', 'font', 'stylesheet'].includes(type)) return route.abort();
     route.continue();
   });
 
   const page = await context.newPage();
 
   try {
-    await page.goto(source.url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    });
+    await page.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    let links = await extractEventLinks(page, source.url);
-
-    // 🔥 FIX 2: limit link explosion
-    links = links.slice(0, 25);
-
-    console.log(`📎 ${links.length} links`);
+    const links = (await extractEventLinks(page, source.url)).slice(0, 15);
+    console.log(`  📎 ${links.length} link bulundu`);
 
     stats.sources_scraped++;
     stats.events_found += links.length;
 
-    const events = [];
+    // Sayfaları tara, ham veri topla
+    const batch = [];
 
     for (const link of links) {
       try {
-        const data = await scrapeEventPageRaw(context, link);
-        if (data) events.push(data);
+        const raw = await scrapePageRaw(context, link);
+        if (raw) batch.push(raw);
 
-        // batch per 10
-        if (events.length === 10) {
-          await processAI(events, source, stats);
-          events.length = 0;
+        // Her 3'te bir AI'a gönder
+        if (batch.length === 3) {
+          await processAIBatch(batch.splice(0, 3), source, stats);
+          await delay(2000, 3000);
         }
-
-        await delay(300, 700);
       } catch (e) {
-        console.warn('skip:', link);
+        console.warn(`  skip: ${link} — ${e.message}`);
       }
     }
 
-    if (events.length > 0) {
-      await processAI(events, source, stats);
+    // Kalan varsa gönder
+    if (batch.length > 0) {
+      await processAIBatch(batch, source, stats);
     }
 
     await supabase
       .from('sources')
-      .update({
-        last_scraped_at: new Date().toISOString(),
-        scraped_count: (source.scraped_count || 0) + 1, // 🔥 FIX 1
-      })
+      .update({ last_scraped_at: new Date().toISOString(), scrape_count: source.scrape_count + 1 })
       .eq('id', source.id);
 
   } catch (err) {
-    console.error('source error:', err.message);
+    console.error(`  ❌ Kaynak hatası: ${err.message}`);
   } finally {
     await context.close();
   }
 }
 
-// ── RAW SCRAPE ──────────────────────────────────────────
-async function scrapeEventPageRaw(context, url) {
+// ── RAW PAGE SCRAPE ──────────────────────────────────────
+async function scrapePageRaw(context, url) {
   const page = await context.newPage();
-
   try {
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const html = await page.content();
     const title = await page.title();
 
-    // 🔥 FIX 3: aggressive trimming
     const cleanHtml = html
-      .replace(/<script[\s\S]*?<\/script>/g, '')
-      .replace(/<style[\s\S]*?<\/style>/g, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
-      .slice(0, 800);
+      .trim()
+      .slice(0, 2000);
 
-    return {
-      url,
-      title,
-      html: cleanHtml,
-    };
-
+    return { url, title, html: cleanHtml };
   } finally {
     await page.close();
   }
 }
 
-// ── AI PROCESS ──────────────────────────────────────────
-async function processAI(events, source, stats) {
-  const prompt = `
-Extract events.
+// ── AI BATCH PROCESS (3'lü) ──────────────────────────────
+async function processAIBatch(events, source, stats) {
+  const prompt = `Extract event information from these ${events.length} pages.
+Return ONLY a JSON array, no other text, no markdown.
 
-Return ONLY JSON array.
+FIELDS TO EXTRACT (use null if unknown):
+- title: event name
+- website: event URL
+- start_date: YYYY-MM-DD
+- abstract_deadline: YYYY-MM-DD
+- confidence: 0.0 to 1.0
 
-FIELDS:
-title, description, category, country, city,
-start_date, end_date,
-abstract_deadline, fullpaper_deadline,
-website, confidence
-
-DATA:
+PAGES:
 ${events.map((e, i) => `
 [${i}]
-url:${e.url}
-title:${e.title}
-content:${e.html}
-`).join('\n')}
-`;
+url: ${e.url}
+title: ${e.title}
+content: ${e.html}
+`).join('\n---\n')}
 
-  const text = await callAI(prompt);
-  const json = safeJson(text);
+Return format: [{"title":"...","website":"...","start_date":"...","abstract_deadline":"...","confidence":0.8}, ...]`;
 
-  if (!Array.isArray(json)) return;
+  try {
+    const text = await callAI(prompt);
 
-  const inserts = json
-    .filter(e => e?.title)
-    .map(e => ({
-      ...e,
-      source_id: source.id,
-      source_url: e.website || e.url,
-      is_new: true,
-      is_active: true,
-      ai_confidence_score: e.confidence || 0.5,
-      ai_extracted_at: new Date().toISOString(),
-      ai_model: 'llama-3.1-8b-instant',
-    }));
+    console.log('\n--- AI RESPONSE ---');
+    console.log(text);
+    console.log('-------------------\n');
 
-  if (!inserts.length) return;
+    const json = safeJson(text);
+    if (!Array.isArray(json)) {
+      console.warn('  ⚠️ AI dizi döndürmedi');
+      return;
+    }
 
-  const { error } = await supabase
-    .from('events')
-    .upsert(inserts, { onConflict: 'source_url' });
+    for (let i = 0; i < json.length; i++) {
+      const item = json[i];
+      if (!item?.title) continue;
 
-  if (!error) {
-    stats.events_added += inserts.length;
+      const sourceUrl = events[i]?.url || item.website;
+
+      // Duplicate kontrolü
+      const { data: existing } = await supabase
+        .from('events')
+        .select('id')
+        .eq('source_url', sourceUrl)
+        .maybeSingle();
+
+      if (existing) {
+        stats.events_duplicate++;
+        continue;
+      }
+
+      const { error } = await supabase.from('events').insert({
+        title: item.title,
+        website: item.website || sourceUrl,
+        start_date: item.start_date || null,
+        abstract_deadline: item.abstract_deadline || null,
+        ai_confidence_score: item.confidence || 0.5,
+        source_id: source.id,
+        source_url: sourceUrl,
+        is_new: true,
+        is_active: true,
+        ai_extracted_at: new Date().toISOString(),
+        ai_model: 'llama-3.1-8b-instant',
+      });
+
+      if (error) {
+        console.warn(`  ⚠️ Insert hatası: ${error.message}`);
+      } else {
+        stats.events_added++;
+        console.log(`  ✅ Eklendi: ${item.title}`);
+      }
+    }
+
+  } catch (err) {
+    console.warn(`  ⚠️ AI batch hatası: ${err.message}`);
   }
 }
 
-// ── LINKS ───────────────────────────────────────────────
+// ── LINK EXTRACTOR ───────────────────────────────────────
 async function extractEventLinks(page, baseUrl) {
-  return page.evaluate((base) => {
-    const links = [...document.querySelectorAll('a[href]')];
-
+  const links = await page.evaluate((base) => {
     return [...new Set(
-      links.map(a => {
-        try { return new URL(a.href, base).href; }
-        catch { return null; }
-      }).filter(Boolean)
+      [...document.querySelectorAll('a[href]')]
+        .map(a => { try { return new URL(a.href, base).href; } catch { return null; } })
+        .filter(Boolean)
     )];
   }, baseUrl);
+
+  const eventPatterns = [
+    /\/etkinlik/i, /\/event/i, /\/conference/i, /\/congress/i,
+    /\/symposium/i, /\/seminar/i, /\/workshop/i, /\/fair/i,
+    /\/expo/i, /cfp/i, /\/kongre/i, /\/sempozyum/i,
+  ];
+
+  return links.filter(url =>
+    eventPatterns.some(p => p.test(url)) &&
+    url.startsWith('http') &&
+    !url.includes('#') &&
+    url !== baseUrl
+  );
 }
 
-// ── NOTIFICATIONS ───────────────────────────────────────
+// ── NOTIFICATIONS ────────────────────────────────────────
 async function sendNotifications(stats) {
-  if (stats.events_added === 0) return;
+  if (stats.events_added === 0) {
+    console.log('📭 Yeni etkinlik yok, mail gönderilmiyor');
+    return;
+  }
 
   const { data: subs } = await supabase
     .from('subscriptions')
@@ -326,19 +329,19 @@ async function sendNotifications(stats) {
       await resend.emails.send({
         from: process.env.FROM_EMAIL,
         to: sub.email,
-        subject: `📅 ${stats.events_added} Yeni Etkinlik`,
-        html: `<p>${stats.events_added} yeni etkinlik eklendi.</p>`,
+        subject: `📅 ${stats.events_added} Yeni Etkinlik Eklendi`,
+        html: `<p>Bu hafta <strong>${stats.events_added}</strong> yeni etkinlik eklendi.</p>`,
       });
-    } catch {}
+    } catch (err) {
+      console.warn(`Mail hatası: ${err.message}`);
+    }
   }
 }
 
-// ── UTILS ───────────────────────────────────────────────
+// ── UTILS ─────────────────────────────────────────────────
 function delay(min, max) {
-  return new Promise(r =>
-    setTimeout(r, Math.floor(Math.random() * (max - min) + min))
-  );
+  return new Promise(r => setTimeout(r, Math.floor(Math.random() * (max - min) + min)));
 }
 
-// ── START ───────────────────────────────────────────────
+// ── START ─────────────────────────────────────────────────
 main().catch(console.error);
