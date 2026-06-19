@@ -1,3 +1,4 @@
+import { scrapeKongreAra, mapKongreAraEvent } from './sources/kongreara.js';
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
 import { Resend } from 'resend';
@@ -100,9 +101,11 @@ async function main() {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
-    await Promise.all(
-      sources.map(source => limit(() => scrapeSource(browser, source, stats)))
-    );
+    // AI tabanlı kaynaklar + AI'sız kongreara.com paralel taranıyor
+    await Promise.all([
+      ...sources.map(source => limit(() => scrapeSource(browser, source, stats))),
+      scrapeKongreAraSource(browser, stats),
+    ]);
 
     await browser.close();
     await sendNotifications(stats);
@@ -124,7 +127,61 @@ async function main() {
   }
 }
 
-// ── SOURCE SCRAPER ───────────────────────────────────────
+// ── KONGREARA.COM SCRAPER (AI'sız, doğrudan JSON parse) ──
+async function scrapeKongreAraSource(browser, stats) {
+  console.log(`\n🔍 kongreara.com (özel parser, AI'sız)`);
+
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
+  });
+
+  try {
+    const rawEvents = await scrapeKongreAra(context);
+
+    stats.sources_scraped++;
+    stats.events_found += rawEvents.length;
+
+    const today = new Date().toISOString().split('T')[0];
+
+    for (const raw of rawEvents) {
+      // Geçmiş tarihli etkinlikleri atla
+      if (!raw.startDate || raw.startDate.split('T')[0] < today) {
+        continue;
+      }
+
+      const eventData = mapKongreAraEvent(raw, null);
+
+      // Duplicate kontrolü
+      const { data: existing } = await supabase
+        .from('events')
+        .select('id')
+        .eq('source_url', eventData.source_url)
+        .maybeSingle();
+
+      if (existing) {
+        stats.events_duplicate++;
+        continue;
+      }
+
+      const { error } = await supabase.from('events').insert(eventData);
+
+      if (error) {
+        console.warn(`  ⚠️ Insert hatası: ${error.message}`);
+      } else {
+        stats.events_added++;
+        console.log(`  ✅ Eklendi: ${eventData.title}`);
+      }
+    }
+
+  } catch (err) {
+    console.error(`  ❌ kongreara.com genel hata: ${err.message}`);
+  } finally {
+    await context.close();
+  }
+}
+
+// ── SOURCE SCRAPER (AI tabanlı, normal kaynaklar) ────────
 async function scrapeSource(browser, source, stats) {
   console.log(`\n🔍 ${source.name} (${source.url})`);
 
@@ -209,7 +266,7 @@ async function scrapePageRaw(context, url) {
 
 // ── AI BATCH PROCESS (3'lü) ──────────────────────────────
 async function processAIBatch(events, source, stats) {
-const prompt = `Extract event information from these ${events.length} pages.
+  const prompt = `Extract event information from these ${events.length} pages.
 Return ONLY a JSON array, no other text, no markdown.
 
 ONLY extract academic/professional events: conferences, congresses, symposiums, fairs, exhibitions.
