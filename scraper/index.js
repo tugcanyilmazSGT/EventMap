@@ -209,7 +209,7 @@ async function scrapePageRaw(context, url) {
 
 // ── AI BATCH PROCESS (3'lü) ──────────────────────────────
 async function processAIBatch(events, source, stats) {
-  const prompt = `Extract event information from these ${events.length} pages.
+const prompt = `Extract event information from these ${events.length} pages.
 Return ONLY a JSON array, no other text, no markdown.
 
 ONLY extract academic/professional events: conferences, congresses, symposiums, fairs, exhibitions.
@@ -218,8 +218,13 @@ Only include events starting in 2026 or later.
 
 FIELDS TO EXTRACT (use null if unknown):
 - title: event name
-- website: event URL
+- category: must be exactly one of "fuar", "kongre", "konferans", "sempozyum" (Turkish), or "workshop", "seminer" if applicable
+- city: city name where event takes place
+- country: country name
+- format: must be exactly one of "online", "fiziksel", "hibrit"
+- website: the event's own official website (NOT the listing page where you found it — try to find the actual event homepage if mentioned in the content)
 - start_date: YYYY-MM-DD
+- end_date: YYYY-MM-DD
 - abstract_deadline: YYYY-MM-DD
 - confidence: 0.0 to 1.0
 
@@ -231,7 +236,7 @@ title: ${e.title}
 content: ${e.html}
 `).join('\n---\n')}
 
-Return format: [{"title":"...","website":"...","start_date":"...","abstract_deadline":"...","confidence":0.8}, ...]`;
+Return format: [{"title":"...","category":"...","city":"...","country":"...","format":"...","website":"...","start_date":"...","end_date":"...","abstract_deadline":"...","confidence":0.8}, ...]`;
 
   try {
     const text = await callAI(prompt);
@@ -284,8 +289,13 @@ Return format: [{"title":"...","website":"...","start_date":"...","abstract_dead
 
       const { error } = await supabase.from('events').insert({
         title: item.title,
+        category: item.category || null,
+        city: item.city || null,
+        country: item.country || null,
+        format: item.format || null,
         website: item.website || sourceUrl,
         start_date: item.start_date || null,
+        end_date: item.end_date || null,
         abstract_deadline: item.abstract_deadline || null,
         ai_confidence_score: item.confidence || 0.5,
         source_id: source.id,
