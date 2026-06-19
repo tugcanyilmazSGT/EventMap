@@ -246,13 +246,31 @@ Return format: [{"title":"...","website":"...","start_date":"...","abstract_dead
       return;
     }
 
+    const today = new Date().toISOString().split('T')[0];
+    const excludeKeywords = [
+      'genel kurul', 'yönetim kurulu', 'danışma kurulu',
+      'dayanışma günü', 'mücadele günü', 'kurultay',
+      'toplantısı', 'paneli',
+    ];
+
     for (let i = 0; i < json.length; i++) {
       const item = json[i];
       if (!item?.title) continue;
 
+      // ── FİLTRE 1: Geçmiş tarihli veya tarihsiz etkinlikleri atla ──
+      if (!item.start_date || item.start_date < today) {
+        continue;
+      }
+
+      // ── FİLTRE 2: İstenmeyen etkinlik türlerini atla ──
+      const titleLower = item.title.toLowerCase();
+      if (excludeKeywords.some(kw => titleLower.includes(kw))) {
+        continue;
+      }
+
       const sourceUrl = events[i]?.url || item.website;
 
-      // Duplicate kontrolü
+      // ── Duplicate kontrolü ──
       const { data: existing } = await supabase
         .from('events')
         .select('id')
@@ -264,59 +282,30 @@ Return format: [{"title":"...","website":"...","start_date":"...","abstract_dead
         continue;
       }
 
-for (let i = 0; i < json.length; i++) {
-  const item = json[i];
-  if (!item?.title) continue;
+      const { error } = await supabase.from('events').insert({
+        title: item.title,
+        website: item.website || sourceUrl,
+        start_date: item.start_date || null,
+        abstract_deadline: item.abstract_deadline || null,
+        ai_confidence_score: item.confidence || 0.5,
+        source_id: source.id,
+        source_url: sourceUrl,
+        is_new: true,
+        is_active: true,
+        ai_extracted_at: new Date().toISOString(),
+        ai_model: 'llama-3.1-8b-instant',
+      });
 
-  // ── FİLTRE 1: Geçmiş tarihli etkinlikleri atla ──
-  const today = new Date().toISOString().split('T')[0];
-  if (item.start_date && item.start_date < today) {
-    continue; // geçmiş etkinlik, ekleme
-  }
+      if (error) {
+        console.warn(`  ⚠️ Insert hatası: ${error.message}`);
+      } else {
+        stats.events_added++;
+        console.log(`  ✅ Eklendi: ${item.title}`);
+      }
+    }
 
-  // ── FİLTRE 2: TMMOB genel kurul/yönetim toplantısı gibi etkinlikleri atla ──
-  const excludeKeywords = [
-    'genel kurul', 'yönetim kurulu', 'danışma kurulu',
-    'dayanışma günü', 'mücadele günü', 'kurultay'
-  ];
-  const titleLower = item.title.toLowerCase();
-  if (excludeKeywords.some(kw => titleLower.includes(kw))) {
-    continue; // istenmeyen etkinlik tipi
-  }
-
-  const sourceUrl = events[i]?.url || item.website;
-
-  // Duplicate kontrolü
-  const { data: existing } = await supabase
-    .from('events')
-    .select('id')
-    .eq('source_url', sourceUrl)
-    .maybeSingle();
-
-  if (existing) {
-    stats.events_duplicate++;
-    continue;
-  }
-
-  const { error } = await supabase.from('events').insert({
-    title: item.title,
-    website: item.website || sourceUrl,
-    start_date: item.start_date || null,
-    abstract_deadline: item.abstract_deadline || null,
-    ai_confidence_score: item.confidence || 0.5,
-    source_id: source.id,
-    source_url: sourceUrl,
-    is_new: true,
-    is_active: true,
-    ai_extracted_at: new Date().toISOString(),
-    ai_model: 'llama-3.1-8b-instant',
-  });
-
-  if (error) {
-    console.warn(`  ⚠️ Insert hatası: ${error.message}`);
-  } else {
-    stats.events_added++;
-    console.log(`  ✅ Eklendi: ${item.title}`);
+  } catch (err) {
+    console.warn(`  ⚠️ AI batch hatası: ${err.message}`);
   }
 }
 
