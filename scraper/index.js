@@ -264,15 +264,30 @@ async function scrapePageRaw(context, url) {
   }
 }
 
+// ── FORMAT NORMALİZASYONU ─────────────────────────────────
+// AI bazen "online and in-person" gibi şemada olmayan değerler döndürüyor.
+// Supabase constraint'i sadece online/fiziksel/hibrit kabul ediyor.
+function normalizeFormat(format) {
+  if (!format) return null;
+  const f = String(format).toLowerCase();
+
+  if (f.includes('online') && (f.includes('in-person') || f.includes('hybrid') || f.includes('hibrit') || f.includes('physical') || f.includes('fiziksel'))) {
+    return 'hibrit';
+  }
+  if (f.includes('hibrit') || f.includes('hybrid')) return 'hibrit';
+  if (f.includes('online')) return 'online';
+  if (f.includes('fiziksel') || f.includes('physical') || f.includes('in-person')) return 'fiziksel';
+
+  return null; // tanınmayan değer varsa null bırak, constraint'i kırmasın
+}
+
 // ── AI BATCH PROCESS (3'lü) ──────────────────────────────
 async function processAIBatch(events, source, stats) {
   const prompt = `Extract event information from these ${events.length} pages.
 Return ONLY a JSON array, no other text, no markdown.
-
 ONLY extract academic/professional events: conferences, congresses, symposiums, fairs, exhibitions.
 DO NOT extract: general assembly meetings, board meetings, advisory council meetings, solidarity days, internal organizational events.
 Only include events starting in 2026 or later.
-
 FIELDS TO EXTRACT (use null if unknown):
 - title: event name
 - category: must be exactly one of "fuar", "kongre", "konferans", "sempozyum" (Turkish), or "workshop", "seminer" if applicable
@@ -284,7 +299,6 @@ FIELDS TO EXTRACT (use null if unknown):
 - end_date: YYYY-MM-DD
 - abstract_deadline: YYYY-MM-DD
 - confidence: 0.0 to 1.0
-
 PAGES:
 ${events.map((e, i) => `
 [${i}]
@@ -292,64 +306,52 @@ url: ${e.url}
 title: ${e.title}
 content: ${e.html}
 `).join('\n---\n')}
-
 Return format: [{"title":"...","category":"...","city":"...","country":"...","format":"...","website":"...","start_date":"...","end_date":"...","abstract_deadline":"...","confidence":0.8}, ...]`;
-
   try {
     const text = await callAI(prompt);
-
     console.log('\n--- AI RESPONSE ---');
     console.log(text);
     console.log('-------------------\n');
-
     const json = safeJson(text);
     if (!Array.isArray(json)) {
       console.warn('  ⚠️ AI dizi döndürmedi');
       return;
     }
-
     const today = new Date().toISOString().split('T')[0];
     const excludeKeywords = [
       'genel kurul', 'yönetim kurulu', 'danışma kurulu',
       'dayanışma günü', 'mücadele günü', 'kurultay',
       'toplantısı', 'paneli',
     ];
-
     for (let i = 0; i < json.length; i++) {
       const item = json[i];
       if (!item?.title) continue;
-
       // ── FİLTRE 1: Geçmiş tarihli veya tarihsiz etkinlikleri atla ──
       if (!item.start_date || item.start_date < today) {
         continue;
       }
-
       // ── FİLTRE 2: İstenmeyen etkinlik türlerini atla ──
       const titleLower = item.title.toLowerCase();
       if (excludeKeywords.some(kw => titleLower.includes(kw))) {
         continue;
       }
-
       const sourceUrl = events[i]?.url || item.website;
-
       // ── Duplicate kontrolü ──
       const { data: existing } = await supabase
         .from('events')
         .select('id')
         .eq('source_url', sourceUrl)
         .maybeSingle();
-
       if (existing) {
         stats.events_duplicate++;
         continue;
       }
-
       const { error } = await supabase.from('events').insert({
         title: item.title,
         category: item.category || null,
         city: item.city || null,
         country: item.country || null,
-        format: item.format || null,
+        format: normalizeFormat(item.format),
         website: item.website || sourceUrl,
         start_date: item.start_date || null,
         end_date: item.end_date || null,
@@ -362,7 +364,6 @@ Return format: [{"title":"...","category":"...","city":"...","country":"...","fo
         ai_extracted_at: new Date().toISOString(),
         ai_model: 'llama-3.1-8b-instant',
       });
-
       if (error) {
         console.warn(`  ⚠️ Insert hatası: ${error.message}`);
       } else {
@@ -370,7 +371,6 @@ Return format: [{"title":"...","category":"...","city":"...","country":"...","fo
         console.log(`  ✅ Eklendi: ${item.title}`);
       }
     }
-
   } catch (err) {
     console.warn(`  ⚠️ AI batch hatası: ${err.message}`);
   }
