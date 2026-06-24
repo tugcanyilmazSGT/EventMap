@@ -90,7 +90,7 @@ function extractEventsFromHtml(html) {
  * format alanını string'e çevirir (0=fiziksel, 1=online, 2=hibrit)
  */
 function mapFormat(formatCode) {
-  const map = { 0: 'fiziksel', 1: 'online', 2: 'hibrit' };
+  const map = { 0: 'physical', 1: 'online', 2: 'hybrid' };
   return map[formatCode] || null;
 }
 
