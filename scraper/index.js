@@ -250,6 +250,29 @@ async function scrapePageRaw(context, url) {
     const html = await page.content();
     const title = await page.title();
 
+    // Sayfadaki harici linkleri bul (kendi domain'i dışındaki linkler)
+    const pageDomain = new URL(url).hostname;
+    const externalLinks = await page.evaluate((domain) => {
+      const links = [...document.querySelectorAll('a[href]')];
+      return links
+        .map(a => a.href)
+        .filter(href => {
+          try {
+            const linkDomain = new URL(href).hostname;
+            return linkDomain !== domain && href.startsWith('http');
+          } catch { return false; }
+        });
+    }, pageDomain);
+
+    // İlk harici linki "muhtemel resmi site" olarak al
+    const officialWebsite = externalLinks.find(link =>
+      !link.includes('facebook.com') &&
+      !link.includes('twitter.com') &&
+      !link.includes('instagram.com') &&
+      !link.includes('linkedin.com') &&
+      !link.includes('youtube.com')
+    ) || null;
+
     const cleanHtml = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -258,7 +281,7 @@ async function scrapePageRaw(context, url) {
       .trim()
       .slice(0, 2000);
 
-    return { url, title, html: cleanHtml };
+    return { url, title, html: cleanHtml, officialWebsite };
   } finally {
     await page.close();
   }
@@ -363,24 +386,24 @@ Return format: [{"title":"...","category":"...","city":"...","country":"...","fo
         stats.events_duplicate++;
         continue;
       }
-      const { error } = await supabase.from('events').insert({
-        title: item.title,
-        category: normalizeCategory(item.category),
-        city: item.city || null,
-        country: item.country || null,
-        format: normalizeFormat(item.format),
-        website: item.website || sourceUrl,
-        start_date: item.start_date || null,
-        end_date: item.end_date || null,
-        abstract_deadline: item.abstract_deadline || null,
-        ai_confidence_score: item.confidence || 0.5,
-        source_id: source.id,
-        source_url: sourceUrl,
-        is_new: true,
-        is_active: true,
-        ai_extracted_at: new Date().toISOString(),
-        ai_model: 'llama-3.1-8b-instant',
-      });
+const { error } = await supabase.from('events').insert({
+  title: item.title,
+  category: normalizeCategory(item.category),
+  city: item.city || null,
+  country: item.country || null,
+  format: normalizeFormat(item.format),
+  website: events[i]?.officialWebsite || item.website || sourceUrl,  // ← önce gerçek link, sonra AI'ın bulduğu, en son fallback
+  start_date: item.start_date || null,
+  end_date: item.end_date || null,
+  abstract_deadline: item.abstract_deadline || null,
+  ai_confidence_score: item.confidence || 0.5,
+  source_id: source.id,
+  source_url: sourceUrl,
+  is_new: true,
+  is_active: true,
+  ai_extracted_at: new Date().toISOString(),
+  ai_model: 'llama-3.1-8b-instant',
+});
       if (error) {
         console.warn(`  ⚠️ Insert hatası: ${error.message}`);
       } else {
