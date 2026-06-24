@@ -266,7 +266,7 @@ async function scrapePageRaw(context, url) {
 
 // ── FORMAT NORMALİZASYONU ─────────────────────────────────
 // AI bazen "online and in-person" gibi şemada olmayan değerler döndürüyor.
-// Supabase constraint'i sadece online/fiziksel/hibrit kabul ediyor.
+// Supabase constraint'i sadece online/physical/hybrid kabul ediyor.
 function normalizeFormat(format) {
   if (!format) return null;
   const f = String(format).toLowerCase();
@@ -277,6 +277,23 @@ function normalizeFormat(format) {
   if (f.includes('hibrit') || f.includes('hybrid')) return 'hybrid';
   if (f.includes('online')) return 'online';
   if (f.includes('fiziksel') || f.includes('physical') || f.includes('in-person')) return 'physical';
+
+  return null;
+}
+
+// ── KATEGORİ NORMALİZASYONU ────────────────────────────────
+// AI Türkçe kategori döndürüyor (fuar/kongre/konferans/sempozyum)
+// ama UI ve veritabanı İngilizce bekliyor (fair/congress/conference/symposium).
+function normalizeCategory(category) {
+  if (!category) return null;
+  const c = String(category).toLowerCase();
+
+  if (c.includes('fuar') || c.includes('fair') || c.includes('expo')) return 'fair';
+  if (c.includes('kongre') || c.includes('congress')) return 'congress';
+  if (c.includes('sempozyum') || c.includes('symposium')) return 'symposium';
+  if (c.includes('konferans') || c.includes('conference')) return 'conference';
+  if (c.includes('çalıştay') || c.includes('workshop')) return 'workshop';
+  if (c.includes('seminer') || c.includes('seminar')) return 'seminar';
 
   return null;
 }
@@ -348,7 +365,7 @@ Return format: [{"title":"...","category":"...","city":"...","country":"...","fo
       }
       const { error } = await supabase.from('events').insert({
         title: item.title,
-        category: item.category || null,
+        category: normalizeCategory(item.category),
         city: item.city || null,
         country: item.country || null,
         format: normalizeFormat(item.format),
