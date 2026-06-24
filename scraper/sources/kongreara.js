@@ -102,12 +102,12 @@ function mapFormat(formatCode) {
  */
 function inferCategory(title) {
   const t = title.toLowerCase();
-  if (t.includes('sempozyum') || t.includes('symposium')) return 'sempozyum';
-  if (t.includes('kongre') || t.includes('congress')) return 'kongre';
-  if (t.includes('konferans') || t.includes('conference')) return 'konferans';
-  if (t.includes('fuar') || t.includes('expo') || t.includes('fair')) return 'fuar';
+  if (t.includes('sempozyum') || t.includes('symposium')) return 'symposium';
+  if (t.includes('kongre') || t.includes('congress')) return 'congress';
+  if (t.includes('konferans') || t.includes('conference')) return 'conference';
+  if (t.includes('fuar') || t.includes('expo') || t.includes('fair')) return 'fair';
   if (t.includes('çalıştay') || t.includes('workshop')) return 'workshop';
-  return 'kongre'; // varsayılan, çoğu kayıt kongre
+  return 'congress';
 }
 
 /**
