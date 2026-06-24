@@ -1,34 +1,53 @@
 // scraper/sources/kongreara.js
 // kongreara.com için özel parser - AI'sız, doğrudan Next.js JSON verisinden çekiyor
+// Tüm sayfaları (pagination) takip eder çünkü AI rate limit'i yok.
 
 /**
  * kongreara.com sayfa kaynağında gömülü __next_f JSON verisini çıkarır.
  * Next.js server-side render edilmiş veriyi script tag'leri içinde tutar.
+ * Her arama terimi için TÜM sayfaları gezer (etkinlik bitene kadar).
  */
 export async function scrapeKongreAra(context, baseUrl = 'https://kongreara.com') {
   const page = await context.newPage();
   const allEvents = [];
 
   try {
-    // 2026 ve sonrası etkinlikleri arıyoruz, "kongre" "konferans" "sempozyum" "fuar" terimleriyle
     const searchTerms = ['kongre', 'konferans', 'sempozyum', 'fuar'];
+    const maxPagesPerTerm = 60; // güvenlik sınırı, normalde çok daha az sayfada biter
 
     for (const term of searchTerms) {
-      const url = `${baseUrl}/arama?q=${encodeURIComponent(term)}`;
-      console.log(`  🔎 kongreara.com taranıyor: "${term}"`);
+      let emptyStreak = 0;
 
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      for (let pageNum = 1; pageNum <= maxPagesPerTerm; pageNum++) {
+        const url = pageNum === 1
+          ? `${baseUrl}/arama?q=${encodeURIComponent(term)}`
+          : `${baseUrl}/arama?q=${encodeURIComponent(term)}&page=${pageNum}`;
 
-      // Sayfanın ham HTML'ini al
-      const html = await page.content();
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch (e) {
+          console.warn(`    ⚠️ Sayfa yüklenemedi: ${url} — ${e.message}`);
+          break;
+        }
 
-      // __next_f.push([1,"...json içeren string..."]) bloklarını bul
-      const events = extractEventsFromHtml(html);
-      console.log(`    📦 ${events.length} etkinlik bulundu`);
+        const html = await page.content();
+        const events = extractEventsFromHtml(html);
 
-      allEvents.push(...events);
+        if (events.length === 0) {
+          emptyStreak++;
+          console.log(`    📦 "${term}" sayfa ${pageNum}: 0 etkinlik`);
+          if (emptyStreak >= 2) {
+            console.log(`    ⏹️  "${term}" için tarama bitti (sayfa ${pageNum})`);
+            break;
+          }
+        } else {
+          emptyStreak = 0;
+          console.log(`    📦 "${term}" sayfa ${pageNum}: ${events.length} etkinlik`);
+          allEvents.push(...events);
+        }
 
-      await new Promise(r => setTimeout(r, 1500)); // nazik bekleme
+        await new Promise(r => setTimeout(r, 800)); // nazik bekleme
+      }
     }
 
   } catch (err) {
@@ -37,7 +56,7 @@ export async function scrapeKongreAra(context, baseUrl = 'https://kongreara.com'
     await page.close();
   }
 
-  // Duplicate temizliği (aynı id birden fazla arama teriminde çıkabilir)
+  // Duplicate temizliği (aynı id birden fazla arama teriminde/sayfada çıkabilir)
   const uniqueEvents = Array.from(
     new Map(allEvents.map(e => [e.id, e])).values()
   );
@@ -53,24 +72,20 @@ export async function scrapeKongreAra(context, baseUrl = 'https://kongreara.com'
 function extractEventsFromHtml(html) {
   const events = [];
 
-  // self.__next_f.push([1,"...içerik..."]) pattern'lerini bul
   const pushBlocks = html.match(/self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g) || [];
 
   for (const block of pushBlocks) {
-    // İçerideki escape edilmiş JSON string'i çıkar
     const match = block.match(/self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/);
     if (!match) continue;
 
     let raw = match[1];
 
-    // Unescape: \" -> ", \\ -> \, \n -> newline
     raw = raw
       .replace(/\\"/g, '"')
       .replace(/\\\\/g, '\\')
       .replace(/\\n/g, '\n')
       .replace(/\\u0026/g, '&');
 
-    // "events":[{...}] dizisini ara
     const eventsMatch = raw.match(/"events":(\[.*?\]),"pageSize"/s);
     if (!eventsMatch) continue;
 
@@ -78,7 +93,6 @@ function extractEventsFromHtml(html) {
       const parsed = JSON.parse(eventsMatch[1]);
       events.push(...parsed);
     } catch (e) {
-      // Bu blok events içermiyor olabilir, sorun değil
       continue;
     }
   }
@@ -88,6 +102,7 @@ function extractEventsFromHtml(html) {
 
 /**
  * format alanını string'e çevirir (0=fiziksel, 1=online, 2=hibrit)
+ * İngilizce döndürüyor çünkü Supabase constraint'i öyle istiyor.
  */
 function mapFormat(formatCode) {
   const map = { 0: 'physical', 1: 'online', 2: 'hybrid' };
@@ -98,7 +113,7 @@ function mapFormat(formatCode) {
  * categoryNames dizisini bizim kategori sistemimize eşler.
  * kongreara'da kategori "alan" anlamına geliyor (Tıp, Mühendislik vb),
  * bizim sistemde "tür" (kongre/konferans/sempozyum/fuar).
- * Başlıktan tür çıkarımı yapıyoruz.
+ * Başlıktan tür çıkarımı yapıyoruz. İngilizce döndürüyor.
  */
 function inferCategory(title) {
   const t = title.toLowerCase();
@@ -107,7 +122,7 @@ function inferCategory(title) {
   if (t.includes('konferans') || t.includes('conference')) return 'conference';
   if (t.includes('fuar') || t.includes('expo') || t.includes('fair')) return 'fair';
   if (t.includes('çalıştay') || t.includes('workshop')) return 'workshop';
-  return 'congress';
+  return 'congress'; // varsayılan, çoğu kayıt kongre
 }
 
 /**
