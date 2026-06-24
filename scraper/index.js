@@ -272,13 +272,13 @@ function normalizeFormat(format) {
   const f = String(format).toLowerCase();
 
   if (f.includes('online') && (f.includes('in-person') || f.includes('hybrid') || f.includes('hibrit') || f.includes('physical') || f.includes('fiziksel'))) {
-    return 'hibrit';
+    return 'hybrid';
   }
-  if (f.includes('hibrit') || f.includes('hybrid')) return 'hibrit';
+  if (f.includes('hibrit') || f.includes('hybrid')) return 'hybrid';
   if (f.includes('online')) return 'online';
-  if (f.includes('fiziksel') || f.includes('physical') || f.includes('in-person')) return 'fiziksel';
+  if (f.includes('fiziksel') || f.includes('physical') || f.includes('in-person')) return 'physical';
 
-  return null; // tanınmayan değer varsa null bırak, constraint'i kırmasın
+  return null;
 }
 
 // ── AI BATCH PROCESS (3'lü) ──────────────────────────────
